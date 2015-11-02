@@ -574,7 +574,8 @@ class CRM_Core_Payment_Stripe extends CRM_Core_Payment {
     // card to be charged immediately.  So, since Stripe only supports one
     // subscription per customer, we have to cancel the existing active
     // subscription first.
-    if (!empty($stripe_customer->subscription) && $stripe_customer->subscription->status == 'active') {
+    ///// Commenting out the section below as it cancels the current subscription and updates with new plan_id
+    /*if (!empty($stripe_customer->subscription) && $stripe_customer->subscription->status == 'active') {
       $stripe_customer->cancelSubscription();
     }
 
@@ -609,7 +610,10 @@ class CRM_Core_Payment_Stripe extends CRM_Core_Payment {
       // Delete the Stripe Subscription from our cron watch list.
       CRM_Core_DAO::executeQuery("DELETE FROM civicrm_stripe_subscriptions
         WHERE invoice_id = %1", $query_params);
-    }
+    }*/
+
+    // create new subcription for each recurring contribution signups
+    $new_subscription = $stripe_customer->subscriptions->create(array('plan' => $plan_id));
 
     // Calculate timestamp for the last installment.
     $end_time = strtotime("+{$installments} {$frequency}");
@@ -619,21 +623,22 @@ class CRM_Core_Payment_Stripe extends CRM_Core_Payment {
     $query_params = array(
       1 => array($stripe_customer->id, 'String'),
       2 => array($invoice_id, 'String'),
+      3 => array($new_subscription->id, 'String'),
     );
 
     // Insert the new Stripe Subscription info.
     // Set end_time to NULL if installments are ongoing indefinitely
     if (empty($installments)) {
       CRM_Core_DAO::executeQuery("INSERT INTO civicrm_stripe_subscriptions
-        (customer_id, invoice_id, is_live)
-        VALUES (%1, %2, '{$this->_islive}')", $query_params);
+        (customer_id, invoice_id, is_live, subscription_id)
+        VALUES (%1, %2, '{$this->_islive}', %3)", $query_params);
     }
     else {
       // Add the end time to the query params.
-      $query_params[3] = array($end_time, 'Integer');
+      $query_params[4] = array($end_time, 'Integer');
       CRM_Core_DAO::executeQuery("INSERT INTO civicrm_stripe_subscriptions
-        (customer_id, invoice_id, end_time, is_live)
-        VALUES (%1, %2, %3, '{$this->_islive}')", $query_params);
+        (customer_id, invoice_id, end_time, is_live, subscription_id)
+        VALUES (%1, %2, %4, '{$this->_islive}', %3)", $query_params);
     }
 
     $params['trxn_id'] = $stripe_response->id;
