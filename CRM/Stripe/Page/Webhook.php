@@ -26,6 +26,7 @@ class CRM_Stripe_Page_Webhook extends CRM_Core_Page {
     // This is for extra security precautions mentioned here: https://stripe.com/docs/webhooks
     $stripe_event_data = Stripe_Event::retrieve($data->id);
     $customer_id = $stripe_event_data->data->object->customer;
+    $subscription_id = $stripe_event_data->data->object->subscription;
     switch($stripe_event_data->type) {
       // Successful recurring payment.
       case 'invoice.payment_succeeded':
@@ -40,11 +41,11 @@ class CRM_Stripe_Page_Webhook extends CRM_Core_Page {
 
         // Find the recurring contribution in CiviCRM by mapping it from Stripe.
         $query_params = array(
-          1 => array($customer_id, 'String'),
+          1 => array($subscription_id, 'String'),
         );
         $rel_info_query = CRM_Core_DAO::executeQuery("SELECT invoice_id, end_time
           FROM civicrm_stripe_subscriptions
-          WHERE customer_id = %1",
+          WHERE subscription_id = %1",
           $query_params);
 
         if (!empty($rel_info_query)) {
@@ -53,7 +54,7 @@ class CRM_Stripe_Page_Webhook extends CRM_Core_Page {
           $end_time = $rel_info_query->end_time;
         }
         else {
-          CRM_Core_Error::Fatal("Error relating this customer ($customer_id) to the one in civicrm_stripe_subscriptions");
+          CRM_Core_Error::Fatal("Error relating this customer ({$customer_id}) to the one in civicrm_stripe_subscriptions.subscription_id ({$subscription_id})");
           exit();
         }
 
@@ -106,11 +107,24 @@ class CRM_Stripe_Page_Webhook extends CRM_Core_Page {
           $query_params = array(
             1 => array($first_contrib_check, 'Integer'),
           );
+          // update contribution status & invoice_id received from Stripe response
           CRM_Core_DAO::executeQuery("UPDATE civicrm_contribution
-            SET contribution_status_id = '1'
+            SET contribution_status_id = '1', invoice_id = '{$new_invoice_id}'
             WHERE id = %1",
             $query_params);
 
+          return;
+        }
+
+        // if same webhook fires again check with received invoice id
+        $query_two_params = array(
+          1 => array($new_invoice_id, 'String'),
+        );
+        $contribution_already_exists = CRM_Core_DAO::singleValueQuery("SELECT id
+          FROM civicrm_contribution
+          WHERE invoice_id = %1", $query_two_params);
+
+        if(!empty($contribution_already_exists)){
           return;
         }
 
@@ -189,13 +203,13 @@ class CRM_Stripe_Page_Webhook extends CRM_Core_Page {
 
         // Find the recurring contribution in CiviCRM by mapping it from Stripe.
         $query_params = array(
-          1 => array($customer_id, 'String'),
+          1 => array($subscription_id, 'String'),
         );
         $invoice_id = CRM_Core_DAO::singleValueQuery("SELECT invoice_id
           FROM civicrm_stripe_subscriptions
-          WHERE customer_id = %1", $query_params);
+          WHERE subscription_id = %1", $query_params);
         if (empty($invoice_id)) {
-          CRM_Core_Error::Fatal("Error relating this customer ({$customer_id}) to the one in civicrm_stripe_subscriptions");
+          CRM_Core_Error::Fatal("Error relating this customer ({$customer_id}) to the one in civicrm_stripe_subscriptions.subscription_id ({$subscription_id})");
           exit();
         }
 
