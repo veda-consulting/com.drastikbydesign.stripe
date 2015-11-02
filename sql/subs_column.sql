@@ -1,0 +1,1 @@
+ALTER TABLE `civicrm_stripe_subscriptions` ADD subscription_id varchar(255);
