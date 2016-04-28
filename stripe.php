@@ -31,7 +31,6 @@ function stripe_civicrm_install() {
   CREATE TABLE IF NOT EXISTS `civicrm_stripe_customers` (
     `email` varchar(64) COLLATE utf8_unicode_ci DEFAULT NULL,
     `id` varchar(255) COLLATE utf8_unicode_ci DEFAULT NULL,
-    `is_live` tinyint(4) NOT NULL COMMENT 'Whether this is a live or test transaction',
     UNIQUE KEY `email` (`email`)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8 COLLATE=utf8_unicode_ci;
   ");
@@ -39,7 +38,6 @@ function stripe_civicrm_install() {
   CRM_Core_DAO::executeQuery("
   CREATE TABLE IF NOT EXISTS `civicrm_stripe_plans` (
     `plan_id` varchar(255) COLLATE utf8_unicode_ci NOT NULL,
-    `is_live` tinyint(4) NOT NULL COMMENT 'Whether this is a live or test transaction',
     UNIQUE KEY `plan_id` (`plan_id`)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8 COLLATE=utf8_unicode_ci;
   ");
@@ -239,7 +237,7 @@ function stripe_add_stripe_js($form) {
 
   $form->addElement('hidden', 'stripe_pub_key', $stripe_pub_key, array('id' => 'stripe-pub-key'));
   CRM_Core_Resources::singleton()
-    ->addScriptFile('com.drastikbydesign.stripe', 'js/civicrm_stripe.js', 0, 'billing-block', FALSE);
+    ->addScriptFile('com.drastikbydesign.stripe', 'js/civicrm_stripe.js', 0, 'html-header', FALSE);
 }
 
 /**

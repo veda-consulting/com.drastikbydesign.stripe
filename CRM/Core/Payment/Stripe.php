@@ -256,15 +256,6 @@ class CRM_Core_Payment_Stripe extends CRM_Core_Payment {
       return $params;
     }
 
-    // Get live/test mode.
-    switch ($this->_mode) {
-      case 'test':
-        $transaction_mode = 0;
-        break;
-      case 'live':
-        $transaction_mode = 1;
-    }
-
     // Get proper entry URL for returning on error.
     if (!(array_key_exists('qfKey', $params))) {
       // Probably not called from a civicrm form (e.g. webform) -
@@ -275,8 +266,20 @@ class CRM_Core_Payment_Stripe extends CRM_Core_Payment {
       $qfKey = $params['qfKey'];
       $parsed_url = parse_url($params['entryURL']);
       $url_path = substr($parsed_url['path'], 1);
-      $params['stripe_error_url'] = $error_url = CRM_Utils_System::url($url_path,
-      $parsed_url['query'] . "&_qf_Main_display=1&qfKey={$qfKey}", FALSE, NULL, FALSE);
+      if (empty($url_path)) {
+        $config = CRM_Core_Config::singleton();
+        $uff = $config->userFrameworkFrontend;
+        // DS: setting this to false, removes page_id from the url, which otherwise suppresses the civi error message
+        // hack for CE home page error messages
+        $config->userFrameworkFrontend = false;
+
+        // set $frontend to true, so we have wp-base-url appended to framework base url
+        $params['stripe_error_url'] = CRM_Utils_System::url('civicrm/donate', "_qf_Main_display=1&qfKey={$qfKey}", FALSE, NULL, FALSE, TRUE);
+        $config->userFrameworkFrontend = $uff;
+      } else {
+        $params['stripe_error_url'] = CRM_Utils_System::url($url_path, $parsed_url['query'] . "&_qf_Main_display=1&qfKey={$qfKey}", FALSE, NULL, FALSE);
+      }
+      $error_url = $params['stripe_error_url'];
     }
 
     // Include Stripe library & Set API credentials.
@@ -343,7 +346,7 @@ class CRM_Core_Payment_Stripe extends CRM_Core_Payment {
 
     $customer_query = CRM_Core_DAO::singleValueQuery("SELECT id
       FROM civicrm_stripe_customers
-      WHERE email = %1 AND is_live = '$transaction_mode'", $query_params);
+      WHERE email = %1", $query_params);
 
     /****
      * If for some reason you cannot use Stripe.js and you are aware of PCI Compliance issues,
@@ -400,7 +403,7 @@ class CRM_Core_Payment_Stripe extends CRM_Core_Payment {
         );
 
         CRM_Core_DAO::executeQuery("INSERT INTO civicrm_stripe_customers
-          (email, id, is_live) VALUES (%1, %2, '$transaction_mode')", $query_params);
+          (email, id) VALUES (%1, %2)", $query_params);
       }
       else {
         CRM_Core_Error::fatal(ts('There was an error saving new customer within Stripe.  Is Stripe down?'));
@@ -444,23 +447,23 @@ class CRM_Core_Payment_Stripe extends CRM_Core_Payment {
         // with a Customer within Stripe.  (Perhaps deleted using Stripe interface?).
         // Store the relationship between CiviCRM's email address for the Contact & Stripe's Customer ID.
         if (isset($stripe_customer)) {
-          /*if ($this->isErrorReturn($stripe_customer)) {
+          if ($this->isErrorReturn($stripe_customer)) {
             return $stripe_customer;
-          }*/
+          }
           // Delete whatever we have for this customer.
           $query_params = array(
             1 => array($email, 'String'),
           );
           CRM_Core_DAO::executeQuery("DELETE FROM civicrm_stripe_customers
-            WHERE email = %1 AND is_live = '$transaction_mode'", $query_params);
+            WHERE email = %1", $query_params);
 
           // Create new record for this customer.
           $query_params = array(
             1 => array($email, 'String'),
             2 => array($stripe_customer->id, 'String'),
           );
-          CRM_Core_DAO::executeQuery("INSERT INTO civicrm_stripe_customers (email, id, is_live)
-            VALUES (%1, %2, '$transaction_mode')", $query_params);
+          CRM_Core_DAO::executeQuery("INSERT INTO civicrm_stripe_customers (email, id)
+            VALUES (%1, %2)", $query_params);
         }
         else {
           // Customer was found in civicrm_stripe database, but unable to be
@@ -562,8 +565,7 @@ class CRM_Core_Payment_Stripe extends CRM_Core_Payment {
     $frequency = $params['frequency_unit'];
     $installments = $params['installments'];
     $frequency_interval = (empty($params['frequency_interval']) ? 1 : $params['frequency_interval']);
-    $currency = strtolower($params['currencyID']);
-    $plan_id = "every-{$frequency_interval}-{$frequency}-{$amount}-{$currency}";
+    $plan_id = "every-{$frequency_interval}-{$frequency}-{$amount}";
 
     // Prepare escaped query params.
     $query_params = array(
@@ -572,16 +574,17 @@ class CRM_Core_Payment_Stripe extends CRM_Core_Payment {
 
     $stripe_plan_query = CRM_Core_DAO::singleValueQuery("SELECT plan_id
       FROM civicrm_stripe_plans
-      WHERE plan_id = %1 AND is_live = '$transaction_mode'", $query_params);
+      WHERE plan_id = %1", $query_params);
 
     if (!isset($stripe_plan_query)) {
+      $domain = CRM_Core_BAO_Domain::getDomain();
       $formatted_amount = '$' . number_format(($amount / 100), 2);
       // Create a new Plan.
       $stripe_plan = array(
         'amount' => $amount,
         'interval' => $frequency,
-        'name' => "CiviCRM every {$frequency_interval} {$frequency}s {$formatted_amount}",
-        'currency' => $currency,
+        'name' => "{$domain->name} every {$frequency_interval} {$frequency}s {$formatted_amount}",
+        'currency' => strtolower($params['currencyID']),
         'id' => $plan_id,
         'interval_count' => $frequency_interval,
       );
@@ -598,8 +601,8 @@ class CRM_Core_Payment_Stripe extends CRM_Core_Payment {
       $query_params = array(
         1 => array($plan_id, 'String'),
       );
-      CRM_Core_DAO::executeQuery("INSERT INTO civicrm_stripe_plans (plan_id, is_live)
-        VALUES (%1, '$transaction_mode')", $query_params);
+      CRM_Core_DAO::executeQuery("INSERT INTO civicrm_stripe_plans (plan_id)
+        VALUES (%1)", $query_params);
     }
 
     // If a contact/customer has an existing active recurring
@@ -611,7 +614,7 @@ class CRM_Core_Payment_Stripe extends CRM_Core_Payment {
     // card to be charged immediately.  So, since Stripe only supports one
     // subscription per customer, we have to cancel the existing active
     // subscription first.
-    if (!empty($stripe_customer->subscription) && $stripe_customer->subscription->status == 'active') {
+    /*if (!empty($stripe_customer->subscription) && $stripe_customer->subscription->status == 'active') {
       $stripe_customer->cancelSubscription();
     }
 
@@ -628,7 +631,7 @@ class CRM_Core_Payment_Stripe extends CRM_Core_Payment {
 
     $existing_subscription_query = CRM_Core_DAO::singleValueQuery("SELECT invoice_id
       FROM civicrm_stripe_subscriptions
-      WHERE customer_id = %1 AND is_live = '$transaction_mode'", $query_params);
+      WHERE customer_id = %1", $query_params);
 
     if (!empty($existing_subscription_query)) {
       // Cancel existing Recurring Contribution in CiviCRM.
@@ -646,7 +649,10 @@ class CRM_Core_Payment_Stripe extends CRM_Core_Payment {
       // Delete the Stripe Subscription from our cron watch list.
       CRM_Core_DAO::executeQuery("DELETE FROM civicrm_stripe_subscriptions
         WHERE invoice_id = %1", $query_params);
-    }
+    }*/
+
+    // create new subcription for each signup process
+    $new_subscription = $stripe_customer->subscriptions->create(array('plan' => $plan_id));
 
     // Calculate timestamp for the last installment.
     $end_time = strtotime("+{$installments} {$frequency}");
@@ -656,24 +662,27 @@ class CRM_Core_Payment_Stripe extends CRM_Core_Payment {
     $query_params = array(
       1 => array($stripe_customer->id, 'String'),
       2 => array($invoice_id, 'String'),
+      3 => array($new_subscription->id, 'String'),
     );
 
     // Insert the new Stripe Subscription info.
     // Set end_time to NULL if installments are ongoing indefinitely
     if (empty($installments)) {
       CRM_Core_DAO::executeQuery("INSERT INTO civicrm_stripe_subscriptions
-        (customer_id, invoice_id, is_live)
-        VALUES (%1, %2, '$transaction_mode')", $query_params);
+        (customer_id, invoice_id, is_live, subscription_id)
+        VALUES (%1, %2, '$transaction_mode', %3)", $query_params);
     }
     else {
       // Add the end time to the query params.
-      $query_params[3] = array($end_time, 'Integer');
+      $query_params[4] = array($end_time, 'Integer');
       CRM_Core_DAO::executeQuery("INSERT INTO civicrm_stripe_subscriptions
-        (customer_id, invoice_id, end_time, is_live)
-        VALUES (%1, %2, %3, '$transaction_mode')", $query_params);
+        (customer_id, invoice_id, end_time, is_live, subscription_id)
+        VALUES (%1, %2, %4, '$transaction_mode', %3)", $query_params);
     }
-
-    $params['trxn_id'] = $stripe_response->id;
+    // To avoid duplicates contribution error if same email contact tries to do second recurring donation
+    if (!CRM_Utils_Array::value('trxn_id', $params)) {
+      $params['trxn_id'] = $stripe_response->id;
+    }
     $params['fee_amount'] = $stripe_response->fee / 100;
     $params['net_amount'] = $params['amount'] - $params['fee_amount'];
 

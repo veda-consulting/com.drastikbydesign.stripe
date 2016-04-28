@@ -11,6 +11,7 @@ class CRM_Stripe_Page_Webhook extends CRM_Core_Page {
     // Get the data from Stripe.
     $data_raw = file_get_contents("php://input");
     $data = json_decode($data_raw);
+    
     if (!$data) {
       CRM_Core_Error::Fatal("Stripe Callback: cannot json_decode data, exiting. <br /> $data");
     }
@@ -26,6 +27,7 @@ class CRM_Stripe_Page_Webhook extends CRM_Core_Page {
     // This is for extra security precautions mentioned here: https://stripe.com/docs/webhooks
     $stripe_event_data = Stripe_Event::retrieve($data->id);
     $customer_id = $stripe_event_data->data->object->customer;
+    $subscription_id = $stripe_event_data->data->object->subscription;
     switch($stripe_event_data->type) {
       // Successful recurring payment.
       case 'invoice.payment_succeeded':
@@ -40,11 +42,11 @@ class CRM_Stripe_Page_Webhook extends CRM_Core_Page {
 
         // Find the recurring contribution in CiviCRM by mapping it from Stripe.
         $query_params = array(
-          1 => array($customer_id, 'String'),
+          1 => array($subscription_id, 'String'),
         );
         $rel_info_query = CRM_Core_DAO::executeQuery("SELECT invoice_id, end_time
           FROM civicrm_stripe_subscriptions
-          WHERE customer_id = %1",
+          WHERE subscription_id = %1",
           $query_params);
 
         if (!empty($rel_info_query)) {
@@ -53,7 +55,7 @@ class CRM_Stripe_Page_Webhook extends CRM_Core_Page {
           $end_time = $rel_info_query->end_time;
         }
         else {
-          CRM_Core_Error::Fatal("Error relating this customer ($customer_id) to the one in civicrm_stripe_subscriptions");
+          CRM_Core_Error::Fatal("Error relating this customer ({$customer_id}) to the one in civicrm_stripe_subscriptions.subscription_id ({$subscription_id})");
           exit();
         }
 
@@ -106,11 +108,24 @@ class CRM_Stripe_Page_Webhook extends CRM_Core_Page {
           $query_params = array(
             1 => array($first_contrib_check, 'Integer'),
           );
+          // update contribution status & invoice_id received from Stripe response
           CRM_Core_DAO::executeQuery("UPDATE civicrm_contribution
-            SET contribution_status_id = '1'
+            SET contribution_status_id = '1', invoice_id = '{$new_invoice_id}'
             WHERE id = %1",
             $query_params);
 
+          return;
+        }
+
+        // if same webhook fires again check with received invoice id
+        $query_two_params = array(
+          1 => array($new_invoice_id, 'String'),
+        );
+        $contribution_already_exists = CRM_Core_DAO::singleValueQuery("SELECT id
+          FROM civicrm_contribution
+          WHERE invoice_id = %1", $query_two_params);
+
+        if(!empty($contribution_already_exists)){
           return;
         }
 
@@ -139,7 +154,17 @@ class CRM_Stripe_Page_Webhook extends CRM_Core_Page {
           %5, %6, %7, %8, %9, %10,
           %11, %12, '1', %13)",
           $query_params);
-
+           
+          //MV: call post hook here.
+          $contribution = new CRM_Contribute_DAO_Contribution();
+          $contribution->trxn_id = $transaction_id;
+          $contribution->contact_id = $recur_contrib_query->contact_id;
+          $contribution->$financial_field = $recur_contrib_query->{$financial_field};
+          $contribution->find(true);
+          CRM_Core_Error::debug_var('contributionFind', $contribution);
+          CRM_Utils_Hook::post('create', 'Contribution', $contribution->id, $contribution);
+          //end
+          
           if (!empty($end_time) && $time_compare > $end_time) {
             $end_date = date("Y-m-d H:i:s", $end_time);
             // Final payment.  Recurring contribution complete.
@@ -189,13 +214,13 @@ class CRM_Stripe_Page_Webhook extends CRM_Core_Page {
 
         // Find the recurring contribution in CiviCRM by mapping it from Stripe.
         $query_params = array(
-          1 => array($customer_id, 'String'),
+          1 => array($subscription_id, 'String'),
         );
         $invoice_id = CRM_Core_DAO::singleValueQuery("SELECT invoice_id
           FROM civicrm_stripe_subscriptions
-          WHERE customer_id = %1", $query_params);
+          WHERE subscription_id = %1", $query_params);
         if (empty($invoice_id)) {
-          CRM_Core_Error::Fatal("Error relating this customer ({$customer_id}) to the one in civicrm_stripe_subscriptions");
+          CRM_Core_Error::Fatal("Error relating this customer ({$customer_id}) to the one in civicrm_stripe_subscriptions.subscription_id ({$subscription_id})");
           exit();
         }
 
@@ -271,8 +296,46 @@ class CRM_Stripe_Page_Webhook extends CRM_Core_Page {
         // Not implemented.
         return;
         break;
-
-    }
+        
+      case 'charge.refunded':
+        //Update refund record in Civi contributions
+        $isRefunded = $stripe_event_data->data->object->refunded;
+        $refunds    = $stripe_event_data->data->object->refunds;
+        if (!$isRefunded) {
+          CRM_Core_Error::Fatal("Failed to check is refunded " . $stripe_event_data->data->object);
+          exit();
+        }
+        
+        $refundId = $refunds->data[0]->id;
+        $chargeId = $refunds->data[0]->charge;
+        
+        try {
+          //This is for extra security precautions mentioned here: https://stripe.com/docs/webhooks
+          $charge = Stripe_Charge::retrieve($chargeId);
+        }
+        catch(Exception $e) {
+          CRM_Core_Error::Fatal("Failed to retrieve Stripe charge.  Message: " . $e->getMessage());
+          exit();
+        }
+        
+        //Find Status id
+        $contribStatus = CRM_Core_OptionGroup::values('contribution_status', FALSE, FALSE, FALSE, NULL, 'name');
+        $statusId      = CRM_Utils_Array::key('Refunded', $contribStatus);
+        
+        $contribution = new CRM_Contribute_DAO_Contribution();
+        $contribution->trxn_id = $chargeId;
+        if ($contribution->find('true')) {
+          $contribution->contribution_status_id = $statusId;
+          $contribution->cancel_date            = date("Y-m-d H:i:s", $refunds->data[0]->created);
+          $contribution->cancel_reason          = "Webhook Refunded - {$refundId}";
+          $contribution->save();
+          CRM_Core_Error::debug_log_message("Contribution (ID: {$contribution->id}, trxn_id: {$chargeId}) status changed to Refunded.");
+        } else {
+          CRM_Core_Error::debug_log_message("Couldn't find any contribution with trxn id {$chargeId}, to change status to Refunded.");
+        }
+        return;
+        break;        
+    }      
 
     parent::run();
   }
