@@ -21,7 +21,7 @@ class CRM_Core_Payment_Stripe extends CRM_Core_Payment {
    * @var object
    * @static
    */
-  static protected $_mode = NULL;
+  protected $_mode = NULL;
 
   /**
    * Constructor
@@ -32,7 +32,7 @@ class CRM_Core_Payment_Stripe extends CRM_Core_Payment {
    * @return void
    */
   function __construct($mode, &$paymentProcessor) {
-    self::$_mode = $mode;
+    $this->_mode = $mode;
     $this->_paymentProcessor = $paymentProcessor;
     $this->_processorName = ts('Stripe');
   }
